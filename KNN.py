@@ -1,251 +1,127 @@
 import pandas as pd
-import sklearn
 import numpy as np
-from sklearn.preprocessing import StandardScaler
-import nltk
-
-from sklearn.cluster import KMeans
-
-'''three different methods for normalization'''
 
 
-def normalize(d):
-    '''df_norm = (((d - d.mean()) ** 2) / d.shape[1]) ** (1 / 2)
-    return df_norm'''
+# from sklearn.preprocessing import MinMaxScaler # 如果需要归一化，可以保留
 
-    x = d.values  # returns a numpy array
-    min_max_scaler = sklearn.preprocessing.MinMaxScaler()
-    x_scaled = min_max_scaler.fit_transform(x)
-    df = pd.DataFrame(x_scaled)
-    return df
+# --- 距离和相似度计算函数（保留，尽管我们主要用 sklearn 的 cosine_similarity）---
 
-    '''data_norm = df  # Has training + test data frames combined to form single data frame
-    normalizer = StandardScaler()
-    data_array = normalizer.fit_transform(data_norm.as_matrix())
-
-    return pd.DataFrame(data_array)'''
-
-def euclidean_distance(train,test):
-    train = np.asarray(train)
-    test = np.asarray(test)
-    temp = train - test
-    temp = [x ** 2 for x in temp]
-    temp = np.divide(temp, len(temp))
-    dist = np.sum(temp)
-    dist = dist ** (1 / 2)
-    return dist.tolist()
+def euclidean_distance(vec1, vec2):
+    """
+    计算两个向量之间的欧几里得距离。
+    Args:
+        vec1 (np.array or list): 第一个向量。
+        vec2 (np.array or list): 第二个向量。
+    Returns:
+        float: 欧几里得距离。
+    """
+    vec1 = np.asarray(vec1)
+    vec2 = np.asarray(vec2)
+    return np.sqrt(np.sum((vec1 - vec2) ** 2))
 
 
-def cosine_similarity(train, test):
-    train = np.asarray(train)
-    test = np.asarray(test)
-    temp = train * test
-    d = np.sum(temp)
-    train = [x ** 2 for x in train]
-    d1 = np.sum(train)
-    d1 = d1 ** (1 / 2)
-    test = [x ** 2 for x in test]
-    d2 = np.sum(test)
-    d2 = d2 ** (1 / 2)
-    return d / (d1 * d2)
+def cosine_similarity_custom(vec1, vec2):
+    """
+    计算两个向量之间的余弦相似度（自定义实现）。
+    Args:
+        vec1 (np.array or list): 第一个向量。
+        vec2 (np.array or list): 第二个向量。
+    Returns:
+        float: 余弦相似度。
+    """
+    vec1 = np.asarray(vec1)
+    vec2 = np.asarray(vec2)
+    dot_product = np.dot(vec1, vec2)
+    norm_vec1 = np.linalg.norm(vec1)
+    norm_vec2 = np.linalg.norm(vec2)
+    if norm_vec1 == 0 or norm_vec2 == 0:
+        return 0.0
+    return dot_product / (norm_vec1 * norm_vec2)
 
 
-def pearson_correlation(train, test):
-    train = np.asarray(train)
-    test = np.asarray(test)
-    n = train.size
-    temp = train * test
-    d = np.sum(temp)
-    d1 = np.sum(train)
-    d2 = np.sum(test)
-    numerator = n * d - d1 * d2
-    train = [x ** 2 for x in train]
-    d11 = np.sum(train)
-    test = [x ** 2 for x in test]
-    d21 = np.sum(test)
-    denominator = (d11 - (d1 ** 2)) * (d21 - (d2 ** 2))
-    denominator = denominator ** 1 / 2
+def pearson_correlation(vec1, vec2):
+    """
+    计算两个向量之间的皮尔逊相关系数。
+    Args:
+        vec1 (np.array or list): 第一个向量。
+        vec2 (np.array or list): 第二个向量。
+    Returns:
+        float: 皮尔逊相关系数。
+    """
+    vec1 = np.asarray(vec1)
+    vec2 = np.asarray(vec2)
+
+    # 确保向量长度一致且不为0
+    if len(vec1) != len(vec2) or len(vec1) == 0:
+        return 0.0
+
+    mean_vec1 = np.mean(vec1)
+    mean_vec2 = np.mean(vec2)
+
+    numerator = np.sum((vec1 - mean_vec1) * (vec2 - mean_vec2))
+    denominator = np.sqrt(np.sum((vec1 - mean_vec1) ** 2) * np.sum((vec2 - mean_vec2) ** 2))
+
+    if denominator == 0:
+        return 0.0
     return numerator / denominator
 
 
-def manhattan_distance(train, test):
-    train = np.asarray(train)
-    test = np.asarray(test)
-    temp = train - test
-    temp = np.absolute(temp)
-    d = np.sum(temp)
-    return d
+def manhattan_distance(vec1, vec2):
+    """
+    计算两个向量之间的曼哈顿距离。
+    Args:
+        vec1 (np.array or list): 第一个向量。
+        vec2 (np.array or list): 第二个向量。
+    Returns:
+        float: 曼哈顿距离。
+    """
+    vec1 = np.asarray(vec1)
+    vec2 = np.asarray(vec2)
+    return np.sum(np.abs(vec1 - vec2))
 
 
-def jaccard_coefficient(train, test):
-    return sklearn.metrics.jaccard_similarity_score(train, test)
+# scikit-learn 的 jaccard_similarity_score 在新版本中已弃用，
+# 且更适用于二值特征。如果需要，可以使用 scipy.spatial.distance.jaccard
+# 或者自己实现，例如:
+# def jaccard_coefficient(set1, set2):
+#    intersection = len(set1.intersection(set2))
+#    union = len(set1.union(set2))
+#    return intersection / union if union != 0 else 0.0
 
 
-def evaluate_nearest(tdf,test,nc):
-    min = 0
-    flag = nc
-    sum = [0 for k in range(tdf.shape[1])]
-    for j in range(nc):
-        for i in range(len(tdf)):
-            templ=tdf.iloc[i]
-            temp = euclidean_distance(templ,test)
-            if (temp < min):
-                min = temp
-                flag = i
-        tempk=tdf.iloc[flag].tolist()
-        sum=np.add(sum,tempk)
-        tdf = tdf.drop(tdf.index[[flag]])
-        print('Shape : ',tdf.shape[0],tdf.shape[1])
-    sum=sum/nc
-    return sum
+# --- K 近邻查找核心函数 ---
 
-'''root mean square error'''
+def find_k_nearest_neighbors(query_id, similarity_matrix, k_neighbors, exclude_self=True):
+    """
+    从相似度矩阵中找到指定查询ID的 K 个最近邻居。
 
+    Args:
+        query_id: 要查找邻居的ID (用户ID或物品ID)。
+        similarity_matrix (pd.DataFrame): 相似度矩阵 (例如 user_similarity_matrix 或 item_similarity_matrix)。
+        k_neighbors (int): 要返回的最近邻居数量。
+        exclude_self (bool): 是否排除查询ID本身。
 
-def rmse(test, rv):
-    temp = 0
-    sum = 0
-    n = len(rv)
-    for i in range(0, n):
-        temp = (rv[i] - test[i]) ** 2
-        temp = temp / n
-        sum = sum + temp
-    sum = sum ** 1 / 2
-    return sum
+    Returns:
+        pd.Series: 包含 K 个最近邻居及其相似度分数的 Series。
+                   Series 的索引是邻居的ID，值是相似度。
+                   按相似度降序排列。
+    """
+    if query_id not in similarity_matrix.index:
+        return pd.Series([], dtype='float64')  # 返回一个空的 Series
 
+    # 获取与 query_id 的所有相似度
+    similarities = similarity_matrix[query_id]
 
-'''mean absolute error'''
+    if exclude_self and query_id in similarities.index:
+        similarities = similarities.drop(query_id)  # 排除自己
+
+    # 筛选出相似度大于0的邻居，并选择最高的 k_neighbors 个
+    # .nlargest() 方法可以高效地获取最大的 N 个值
+    k_nearest = similarities[similarities > 0].nlargest(k_neighbors)
+
+    return k_nearest
 
 
-def mae(test, rv):
-    temp = 0
-    sum = 0
-    n = len(rv)
-    for i in range(0, n):
-        temp = (rv[i] - test[i])
-        temp = temp / n
-        sum = sum + temp
-    return abs(sum)
-
-
-'''precision recall f-measure'''
-
-
-def prfm(test, rv):
-    t = listtobinary(test)
-    r = listtobinary(rv)
-    tp = 0
-    tn = 0
-    fp = 0
-    fn = 0
-    n = len(t)
-    for i in range(0, n):
-        if (t[i] == 1 and r[i] == 1):
-            tp = tp + 1
-        elif (t[i] == 1 and r[i] == 0):
-            fn = fn + 1
-        elif (t[i] == 0 and r[i] == 1):
-            fp = fp + 1
-        elif (t[i] == 0 and r[i] == 0):
-            tn = tn + 1
-    precision = tp / (tp + fp)
-    recall = tp / (tp + fn)
-    fm = (2 * precision * recall) / (precision + recall)
-    prfm = [precision, recall, fm, tp, tn, fp, fn]
-    print(prfm)
-    return prfm
-
-
-def listtobinary(listpassed):
-    temp = listpassed
-    for i in range(0, len(temp)):
-        if (temp[i] != 0):
-            temp[i] = 1
-    return temp
-
-rma=0
-ma=0
-pa=0
-ra=0
-fa=0
-itercount=10
-for q in range(itercount):
-    df = pd.read_csv('UIMatrix_selectedcolumns.csv')
-    tsidcol = list(df.columns.values)
-    #del tsidcol[1]
-    '''df=df.sample(70)
-    print(df)'''
-    d = df._get_numeric_data()
-    d = normalize(d)
-    print(d)
-    traindf = d.sample(frac = 0.9)
-    testdf = d.drop(traindf.index)
-    neighbour_count  = 5
-    row_count = traindf.shape[0]
-
-
-    rvdfl = []
-
-    for i in range(testdf.shape[0]):
-        test = testdf.iloc[i]
-        recommend_vector = []
-        recommend_vector = evaluate_nearest(traindf,test,neighbour_count)
-        # print(recommend_vector)
-        print(i)
-        rvdfl.append(recommend_vector)
-    rvdf = pd.DataFrame(rvdfl)
-
-    print('Recommended vector :')
-    print(rvdf)
-
-    '''rvdf = pd.DataFrame(rvdfl, columns=tsidcol)
-    print('Recommended vector :')
-    print(rvdf)
-    print('testdf:', testdf)
-    testdf = np.asarray(testdf)
-    testdf = pd.DataFrame(testdf, columns=tsidcol)
-    print(testdf)
-    sdf = pd.read_csv('postmatriclistsc10.csv')
-    sdf = sdf.sort_values(by=['count'], ascending=False)
-    columns = 60  # eval(input("enter columns"))
-    sdf = sdf.head(columns)
-    sidlist = sdf['songid'].tolist()
-    print(sidlist)
-    testdf = testdf[testdf.columns.intersection(sidlist)]
-    print('testdf :', testdf)
-    rvdf = rvdf[rvdf.columns.intersection(sidlist)]
-    print('rvdf :', rvdf)'''
-    '''rmse'''
-    sum = 0
-    for i in range(testdf.shape[0]):
-        sum = sum + rmse(testdf.iloc[i], rvdf.iloc[i])
-    rmsev = sum / testdf.shape[0]
-    print(testdf.shape[1])
-    print('rmse : ', rmsev)
-    '''mae'''
-    sum = 0
-    for i in range(testdf.shape[0]):
-        sum = sum + mae(testdf.iloc[i], rvdf.iloc[i])
-    maev = sum / testdf.shape[0]
-    print('mae:', maev)
-    '''prfm'''
-    precisiont = 0
-    recallt = 0
-    fmt = 0
-    for i in range(testdf.shape[0]):
-        templist = []
-        templist = prfm(testdf.iloc[i], rvdf.iloc[i])
-        precisiont = precisiont + templist[0]
-        recallt = recallt + templist[1]
-        fmt = fmt + templist[2]
-    precisionv = precisiont / testdf.shape[0]
-    recallv = recallt / testdf.shape[0]
-    fmv = fmt / testdf.shape[0]
-    print('Precision :', precisionv, 'Recall :', recallv, 'F-Measure :', fmv)
-    rma = rma + rmsev
-    ma = ma + maev
-    pa = pa + precisionv
-    ra = ra + recallv
-    fa = fa + fmv
-print(rma / itercount, ma / itercount, pa / itercount, ra / itercount, fa / itercount, )
-
+# 调试/测试用
+if __name__ == '__main__':
+    print("KNN.py 模块已加载。")
