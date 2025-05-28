@@ -8,6 +8,7 @@ import recommender_eval as re  # 评估模块
 import os  # 用于检查文件是否存在
 import joblib  # 用于保存和加载对象
 import pickle  # 用于保存和加载非 joblib 格式的对象，如 dict
+import time # 用于计时
 
 # 从 sklearn 导入用于数据划分的工具
 from sklearn.model_selection import train_test_split
@@ -19,9 +20,8 @@ USER_FRIENDS_DAT_PATH = 'resources/user_friends.dat'  # 新增：社交数据路
 
 # 定义缓存文件夹和文件路径
 CACHE_DIR = 'cache'
-# 注意：这里我们不再直接缓存 user_similarity_matrix.pkl 和 item_similarity_matrix.pkl，
-# 而是会缓存融合后的用户相似度矩阵和纯余弦物品相似度矩阵
 USER_FRIENDS_CACHE = os.path.join(CACHE_DIR, 'user_friends_data.pkl')  # 新增：社交数据缓存
+ITEM_SIMILARITY_CACHE = os.path.join(CACHE_DIR, 'item_similarity_matrix.pkl') # Item-Based CF 相似度矩阵缓存
 
 # 确保缓存目录存在
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -31,16 +31,20 @@ MIN_LISTEN_COUNT = 10
 MIN_USERS_PER_ARTIST = 5
 MIN_ARTISTS_PER_USER = 10
 
-# 定义协同过滤参数
+# --- 最终选择的最佳协同过滤参数 ---
+# User-Based CF with Social Fusion 的最佳参数
+BEST_ALPHA_FUSION_UB = 0.18
+BEST_K_NEIGHBORS_UB = 200
+
+# Item-Based CF 的最佳参数
+BEST_K_NEIGHBORS_IB = 180
+
 NUM_RECOMMENDATIONS = 10  # 推荐数量
-K_NEIGHBORS = 50  # 邻居数量
 
-# 融合社交信息的权重 (超参数，可以调整)
-ALPHA_FUSION = 0.3  # 0表示纯行为相似度，1表示纯社交相似度
-
-# 快速评估模式设置
-FAST_EVAL_MODE = True
-FAST_EVAL_USER_LIMIT = 200  # 限制评估用户数量
+# --- 评估模式设置 ---
+# 设置为 False 进行完整评估，这将评估所有符合条件的用户
+FAST_EVAL_MODE = False
+FAST_EVAL_USER_LIMIT = 200  # 快速评估模式下评估的用户数量 (FAST_EVAL_MODE=False 时此值无效)
 
 print("--- 音乐推荐系统启动 ---")
 
@@ -146,53 +150,49 @@ if user_friends_data is None:
     print("社交数据加载失败，将无法使用社交信息进行推荐。")
     user_friends_data = {}  # 设为空字典，防止后续报错
 
-# --- 阶段 3: 协同过滤算法实现 - 相似度计算 (融合社交信息) ---
-print("\n--- 阶段 3: 计算协同过滤相似度 (融合社交信息) ---")
+# --- 阶段 3: 计算协同过滤相似度 (基于训练矩阵) ---
+print("\n--- 阶段 3: 计算协同过滤相似度 ---")
 
-user_similarity_matrix_fused = None  # 融合后的用户相似度矩阵
+# 计算并缓存融合用户相似度矩阵 (User-Based CF with Social Fusion)
+user_similarity_matrix_fused = None
+fused_sim_cache_path = os.path.join(CACHE_DIR, f'user_similarity_fused_alpha_{BEST_ALPHA_FUSION_UB}.pkl')
 
-# 定义融合相似度矩阵的缓存路径，包含 ALPHA_FUSION 值
-fused_sim_cache_path = os.path.join(CACHE_DIR, f'user_similarity_fused_alpha_{ALPHA_FUSION}.pkl')
-
-# 尝试加载缓存的融合相似度矩阵
 if os.path.exists(fused_sim_cache_path):
-    print(f"\n尝试从缓存文件 '{fused_sim_cache_path}' 加载融合相似度矩阵...")
+    print(f"尝试从缓存文件 '{fused_sim_cache_path}' 加载融合用户相似度矩阵...")
     try:
         user_similarity_matrix_fused = joblib.load(fused_sim_cache_path)
-        print("融合相似度矩阵已从缓存加载。")
-        # 简单检查形状是否匹配。更严格的检查需要对比用户ID映射，但通常形状匹配即可
         if user_similarity_matrix_fused.shape[0] != user_artist_matrix_train.shape[0] or \
-                user_similarity_matrix_fused.shape[1] != user_artist_matrix_train.shape[0]:
+           user_similarity_matrix_fused.shape[1] != user_artist_matrix_train.shape[0]:
             print("警告：缓存的融合相似度矩阵形状不匹配，将重新计算。")
             user_similarity_matrix_fused = None
     except Exception as e:
-        print(f"加载缓存失败: {e}。将重新计算融合相似度矩阵。")
+        print(f"加载缓存失败: {e}。将重新计算融合用户相似度矩阵。")
         user_similarity_matrix_fused = None
 
-# 如果缓存不存在或加载失败，则重新计算
 if user_similarity_matrix_fused is None:
-    print("\n计算融合用户相似度矩阵（未命中缓存或缓存失效）...")
+    start_time_ub_sim = time.time()
+    print(f"\n计算 User-Based CF 融合用户相似度矩阵 (Alpha={BEST_ALPHA_FUSION_UB})...")
     user_similarity_matrix_fused = ra.calculate_user_similarity_social_fused(
         user_artist_matrix_train,
         user_friends_data,
         user_id_to_idx_train,
         idx_to_user_id_train,
-        alpha=ALPHA_FUSION
+        alpha=BEST_ALPHA_FUSION_UB
     )
     joblib.dump(user_similarity_matrix_fused, fused_sim_cache_path)
-    print(f"融合用户相似度矩阵已计算并保存到缓存文件 '{fused_sim_cache_path}'。")
+    end_time_ub_sim = time.time()
+    print(f"融合用户相似度矩阵计算并保存完成，耗时: {end_time_ub_sim - start_time_ub_sim:.2f} 秒。")
 
 print("融合用户相似度矩阵维度:", user_similarity_matrix_fused.shape)
 
-# 为 Item-Based CF 计算物品相似度 (仍使用纯余弦相似度)
-item_similarity_matrix = None
-# 定义物品相似度矩阵的缓存路径
-item_sim_cache_path = os.path.join(CACHE_DIR, 'item_similarity_matrix.pkl')
 
-if os.path.exists(item_sim_cache_path):
-    print(f"\n尝试从缓存文件 '{item_sim_cache_path}' 加载物品相似度矩阵...")
+# 计算并缓存物品相似度矩阵 (Item-Based CF)
+item_similarity_matrix = None
+
+if os.path.exists(ITEM_SIMILARITY_CACHE):
+    print(f"\n尝试从缓存文件 '{ITEM_SIMILARITY_CACHE}' 加载物品相似度矩阵...")
     try:
-        item_similarity_matrix = joblib.load(item_sim_cache_path)
+        item_similarity_matrix = joblib.load(ITEM_SIMILARITY_CACHE)
         if item_similarity_matrix.shape[0] != user_artist_matrix_train.shape[1] or \
                 item_similarity_matrix.shape[1] != user_artist_matrix_train.shape[1]:
             print("警告：缓存的物品相似度矩阵形状不匹配，将重新计算。")
@@ -202,170 +202,101 @@ if os.path.exists(item_sim_cache_path):
         item_similarity_matrix = None
 
 if item_similarity_matrix is None:
+    start_time_ib_sim = time.time()
     print("\n计算物品（艺术家）相似度...")
     artist_user_matrix_train = user_artist_matrix_train.T  # CSR matrix 的转置是 CSC matrix
     item_similarity_matrix = ra.calculate_item_similarity_cosine(artist_user_matrix_train)
-    joblib.dump(item_similarity_matrix, item_sim_cache_path)
-    print(f"物品相似度矩阵已计算并保存到缓存文件 '{item_sim_cache_path}'。")
+    joblib.dump(item_similarity_matrix, ITEM_SIMILARITY_CACHE)
+    end_time_ib_sim = time.time()
+    print(f"物品相似度矩阵已计算并保存到缓存文件 '{ITEM_SIMILARITY_CACHE}'，耗时: {end_time_ib_sim - start_time_ib_sim:.2f} 秒。")
 
 print("物品相似度矩阵维度:", item_similarity_matrix.shape)
+
 
 # --- 阶段 4: 推荐生成和评估 ---
 print("\n--- 阶段 4: 推荐生成和评估 ---")
 
-# --- 4.1 演示单个用户的推荐 (使用 User-Based CF 融合社交信息) ---
-# 找一个存在于训练集中的用户ID作为示例
-if len(user_id_to_idx_train) > 0:
-    example_user_id = next(iter(user_id_to_idx_train.keys()))  # 获取第一个用户ID
-else:
-    example_user_id = -1
+# 获取训练集和测试集中都存在的用户 (用于评估的用户列表)
+users_in_train_and_test = set(user_id_to_idx_train.keys()).intersection(user_item_ratings_test.keys())
+users_to_evaluate_ids_raw = list(users_in_train_and_test)
 
-print(f"\n为用户 {example_user_id} 生成基于用户协同过滤 (融合社交信息) 的 Top-{NUM_RECOMMENDATIONS} 推荐：")
-if user_similarity_matrix_fused is not None:
-    user_based_recommended_artist_ids = ra.recommend_user_based_cf(
-        user_id=example_user_id,
-        user_artist_matrix=user_artist_matrix_train,  # 传递原始矩阵，如果算法需要
-        user_similarity_matrix=user_similarity_matrix_fused,  # 使用融合后的相似度
-        user_id_to_idx=user_id_to_idx_train,
-        idx_to_user_id=idx_to_user_id_train,
-        user_item_ratings_train=user_item_ratings_train,  # 传递训练集播放记录用于过滤
-        num_recommendations=NUM_RECOMMENDATIONS,
-        k_neighbors=K_NEIGHBORS
+users_for_eval = []
+if FAST_EVAL_MODE:
+    np.random.seed(42) # 保证每次运行选到的用户相同
+    users_for_eval = np.random.choice(users_to_evaluate_ids_raw,
+                                             min(FAST_EVAL_USER_LIMIT, len(users_to_evaluate_ids_raw)),
+                                             replace=False).tolist()
+    print(f"!!! 快速评估模式：只评估 {len(users_for_eval)} 个用户 !!!")
+else:
+    users_for_eval = users_to_evaluate_ids_raw
+    print(f"--- 完整评估模式：评估所有 {len(users_for_eval)} 个符合条件的用户 ---")
+
+# 进一步过滤测试集，只保留那些在训练矩阵中存在的用户和艺术家
+eval_test_ratings_filtered = {}
+for user_id in users_for_eval:
+    current_user_test_artists = user_item_ratings_test.get(user_id, {})
+    filtered_artists = {
+        artist_id: count for artist_id, count in current_user_test_artists.items()
+        if artist_id in artist_id_to_idx_train # 艺术家在训练集构建的矩阵中存在
+    }
+    if filtered_artists: # 如果过滤后用户仍有有效测试记录
+        eval_test_ratings_filtered[user_id] = filtered_artists
+
+print(f"最终用于评估的用户数量: {len(eval_test_ratings_filtered)}")
+
+
+# --- 评估 User-Based CF (Social Fused) 使用最佳参数 ---
+if user_similarity_matrix_fused is not None and eval_test_ratings_filtered:
+    print(f"\n--- 评估 User-Based CF (Social Fused) 使用最佳参数 (Alpha={BEST_ALPHA_FUSION_UB:.2f}, K_Neighbors={BEST_K_NEIGHBORS_UB}) ---")
+    start_time_ub_eval = time.time()
+    avg_precision_ub, avg_recall_ub = re.evaluate_model(
+        recommendation_function=lambda uid: ra.recommend_user_based_cf(
+            user_id=uid,
+            user_artist_matrix=user_artist_matrix_train,
+            user_similarity_matrix=user_similarity_matrix_fused,
+            user_id_to_idx=user_id_to_idx_train,
+            idx_to_user_id=idx_to_user_id_train,
+            user_item_ratings_train=user_item_ratings_train,
+            num_recommendations=NUM_RECOMMENDATIONS,
+            k_neighbors=BEST_K_NEIGHBORS_UB
+        ),
+        user_item_ratings_test=eval_test_ratings_filtered,
+        users_to_evaluate_ids=list(eval_test_ratings_filtered.keys()),
+        top_k=NUM_RECOMMENDATIONS
     )
-    # 将推荐的艺术家ID转换为名称以便显示
-    recommended_artist_names = []
-    for artist_id in user_based_recommended_artist_ids:
-        artist_name_row = artist_info_df.loc[artist_info_df['id'] == artist_id, 'name']
-        artist_name = artist_name_row.iloc[0] if not artist_name_row.empty else f"未知艺术家 ({artist_id})"
-        recommended_artist_names.append(artist_name)
-
-    print(f"为用户 {example_user_id} 推荐的艺术家：")
-    if recommended_artist_names:
-        for i, artist_name in enumerate(recommended_artist_names):
-            print(f"{i + 1}. {artist_name}")
-    else:
-        print("没有生成推荐。")
+    end_time_ub_eval = time.time()
+    print(f"User-Based CF (Social Fused) Precision@{NUM_RECOMMENDATIONS}: {avg_precision_ub:.4f}")
+    print(f"User-Based CF (Social Fused) Recall@{NUM_RECOMMENDATIONS}: {avg_recall_ub:.4f}")
+    print(f"User-Based CF (Social Fused) 评估耗时: {end_time_ub_eval - start_time_ub_eval:.2f} 秒。")
 else:
-    print("融合用户相似度矩阵为空，无法进行用户推荐示例。")
+    print("没有可用于评估 User-Based CF 的有效测试用户或相似度矩阵为空。")
 
-# --- 4.2 演示单个用户的推荐 (使用 Item-Based CF) ---
-print(f"\n为用户 {example_user_id} 生成基于物品协同过滤的 Top-{NUM_RECOMMENDATIONS} 推荐：")
-if item_similarity_matrix is not None:
-    item_based_recommended_artist_ids = ra.recommend_item_based_cf(
-        user_id=example_user_id,
-        user_artist_matrix=user_artist_matrix_train,  # 传递原始矩阵，如果算法需要
-        item_similarity_matrix=item_similarity_matrix,
-        user_id_to_idx=user_id_to_idx_train,
-        artist_id_to_idx=artist_id_to_idx_train,
-        idx_to_artist_id=idx_to_artist_id_train,
-        user_item_ratings_train=user_item_ratings_train,  # 传递训练集播放记录用于过滤
-        num_recommendations=NUM_RECOMMENDATIONS,
-        k_neighbors=K_NEIGHBORS
+
+# --- 评估 Item-Based CF 使用最佳参数 ---
+if item_similarity_matrix is not None and eval_test_ratings_filtered:
+    print(f"\n--- 评估 Item-Based CF 使用最佳参数 (K_Neighbors={BEST_K_NEIGHBORS_IB}) ---")
+    start_time_ib_eval = time.time()
+    avg_precision_ib, avg_recall_ib = re.evaluate_model(
+        recommendation_function=lambda uid: ra.recommend_item_based_cf(
+            user_id=uid,
+            user_artist_matrix=user_artist_matrix_train,
+            item_similarity_matrix=item_similarity_matrix,
+            user_id_to_idx=user_id_to_idx_train,
+            artist_id_to_idx=artist_id_to_idx_train,
+            idx_to_artist_id=idx_to_artist_id_train,
+            user_item_ratings_train=user_item_ratings_train,
+            num_recommendations=NUM_RECOMMENDATIONS,
+            k_neighbors=BEST_K_NEIGHBORS_IB
+        ),
+        user_item_ratings_test=eval_test_ratings_filtered,
+        users_to_evaluate_ids=list(eval_test_ratings_filtered.keys()),
+        top_k=NUM_RECOMMENDATIONS
     )
-    # 将推荐的艺术家ID转换为名称以便显示
-    recommended_artist_names_item_based = []
-    for artist_id in item_based_recommended_artist_ids:
-        artist_name_row = artist_info_df.loc[artist_info_df['id'] == artist_id, 'name']
-        artist_name = artist_name_row.iloc[0] if not artist_name_row.empty else f"未知艺术家 ({artist_id})"
-        recommended_artist_names_item_based.append(artist_name)
-
-    print(f"为用户 {example_user_id} 推荐的艺术家：")
-    if recommended_artist_names_item_based:
-        for i, artist_name in enumerate(recommended_artist_names_item_based):
-            print(f"{i + 1}. {artist_name}")
-    else:
-        print("没有生成推荐。")
+    end_time_ib_eval = time.time()
+    print(f"Item-Based CF Precision@{NUM_RECOMMENDATIONS}: {avg_precision_ib:.4f}")
+    print(f"Item-Based CF Recall@{NUM_RECOMMENDATIONS}: {avg_recall_ib:.4f}")
+    print(f"Item-Based CF 评估耗时: {end_time_ib_eval - start_time_ib_eval:.2f} 秒。")
 else:
-    print("物品相似度矩阵为空，无法进行物品推荐示例。")
-
-# --- 4.3 评估推荐系统 ---
-print("\n--- 评估推荐系统性能 ---")
-
-# 评估 User-Based CF (融合社交信息)
-if user_similarity_matrix_fused is not None:
-    print(f"\n开始评估 User-Based CF (融合社交信息，快速模式={FAST_EVAL_MODE})...")
-
-    # 获取训练集和测试集中都存在的用户
-    users_in_train_and_test = set(user_id_to_idx_train.keys()).intersection(user_item_ratings_test.keys())
-
-    users_to_evaluate_ids_raw = list(users_in_train_and_test)
-
-    users_for_eval = []
-    if FAST_EVAL_MODE:
-        # 随机选择一部分用户进行评估
-        np.random.seed(42)  # 保证每次运行选到的用户相同
-        # 从 all_test_users 中抽取
-        users_for_eval = np.random.choice(users_to_evaluate_ids_raw,
-                                          min(FAST_EVAL_USER_LIMIT, len(users_to_evaluate_ids_raw)),
-                                          replace=False).tolist()
-        print(f"!!! 快速评估模式：只评估 {len(users_for_eval)} 个用户 !!!")
-    else:
-        users_for_eval = users_to_evaluate_ids_raw
-
-    # 进一步过滤测试集，只保留那些在训练矩阵中存在的用户和艺术家
-    # 并且只考虑在快速评估模式下选择的用户
-    eval_test_ratings_filtered = {}
-    for user_id in users_for_eval:
-        # 确保测试集中用户的艺术家也在训练矩阵中存在
-        current_user_test_artists = user_item_ratings_test.get(user_id, {})
-        filtered_artists = {
-            artist_id: count for artist_id, count in current_user_test_artists.items()
-            if artist_id in artist_id_to_idx_train  # 艺术家在训练集构建的矩阵中存在
-        }
-        if filtered_artists:  # 如果过滤后用户仍有有效测试记录
-            eval_test_ratings_filtered[user_id] = filtered_artists
-
-    print(f"最终用于评估的用户数量: {len(eval_test_ratings_filtered)}")
-
-    if eval_test_ratings_filtered:
-        avg_precision_ub, avg_recall_ub = re.evaluate_model(
-            recommendation_function=lambda uid: ra.recommend_user_based_cf(
-                user_id=uid,
-                user_artist_matrix=user_artist_matrix_train,
-                user_similarity_matrix=user_similarity_matrix_fused,
-                user_id_to_idx=user_id_to_idx_train,
-                idx_to_user_id=idx_to_user_id_train,
-                user_item_ratings_train=user_item_ratings_train,
-                num_recommendations=NUM_RECOMMENDATIONS,
-                k_neighbors=K_NEIGHBORS
-            ),
-            user_item_ratings_test=eval_test_ratings_filtered,  # 使用过滤后的测试集
-            users_to_evaluate_ids=list(eval_test_ratings_filtered.keys()),  # 传递实际要评估的用户ID列表
-            top_k=NUM_RECOMMENDATIONS
-        )
-        print(f"User-Based CF (Social Fused) 平均 Precision@{NUM_RECOMMENDATIONS}: {avg_precision_ub:.4f}")
-        print(f"User-Based CF (Social Fused) 平均 Recall@{NUM_RECOMMENDATIONS}: {avg_recall_ub:.4f}")
-    else:
-        print("没有可用于评估 User-Based CF 的有效测试用户。")
-
-else:
-    print("融合用户相似度矩阵为空，跳过 User-Based CF 评估。")
-
-# 评估 Item-Based CF
-if item_similarity_matrix is not None:
-    print(f"\n开始评估 Item-Based CF (快速模式={FAST_EVAL_MODE})...")
-    if eval_test_ratings_filtered:  # 使用与 User-Based CF 相同的过滤用户列表进行评估
-        avg_precision_ib, avg_recall_ib = re.evaluate_model(
-            recommendation_function=lambda uid: ra.recommend_item_based_cf(
-                user_id=uid,
-                user_artist_matrix=user_artist_matrix_train,
-                item_similarity_matrix=item_similarity_matrix,
-                user_id_to_idx=user_id_to_idx_train,
-                artist_id_to_idx=artist_id_to_idx_train,
-                idx_to_artist_id=idx_to_artist_id_train,
-                user_item_ratings_train=user_item_ratings_train,
-                num_recommendations=NUM_RECOMMENDATIONS,
-                k_neighbors=K_NEIGHBORS
-            ),
-            user_item_ratings_test=eval_test_ratings_filtered,  # 使用过滤后的测试集
-            users_to_evaluate_ids=list(eval_test_ratings_filtered.keys()),  # 传递实际要评估的用户ID列表
-            top_k=NUM_RECOMMENDATIONS
-        )
-        print(f"Item-Based CF 平均 Precision@{NUM_RECOMMENDATIONS}: {avg_precision_ib:.4f}")
-        print(f"Item-Based CF 平均 Recall@{NUM_RECOMMENDATIONS}: {avg_recall_ib:.4f}")
-    else:
-        print("没有可用于评估 Item-Based CF 的有效测试用户。")
-else:
-    print("物品相似度矩阵为空，跳过 Item-Based CF 评估。")
+    print("没有可用于评估 Item-Based CF 的有效测试用户或物品相似度矩阵为空。")
 
 print("\n--- 音乐推荐系统关闭 ---")
