@@ -1,6 +1,9 @@
+# UserMatrix2.py
+
 import pandas as pd
 from scipy.sparse import csr_matrix
-import numpy as np # 确保引入 numpy
+import numpy as np  # 确保引入 numpy
+
 
 def build_user_artist_matrix(user_artists_path, artists_path, min_listen_count,
                              min_users_per_artist, min_artists_per_user, input_df=None):
@@ -47,7 +50,7 @@ def build_user_artist_matrix(user_artists_path, artists_path, min_listen_count,
     if filtered_df.empty:
         print("警告: 经过过滤后，DataFrame 为空。请检查过滤条件。")
         # 返回空矩阵和空映射，确保返回类型一致
-        return csr_matrix((0,0)), {}, {}, {}, {}, {}
+        return csr_matrix((0, 0)), {}, {}, {}, {}, {}
 
     # 构建 ID 到索引的映射
     unique_users = filtered_df['userID'].unique()
@@ -82,4 +85,50 @@ def build_user_artist_matrix(user_artists_path, artists_path, min_listen_count,
 
     # 返回 CSR 矩阵和所有映射以及 user_item_ratings 字典
     return user_artist_matrix, user_id_to_idx, idx_to_user_id, \
-           artist_id_to_idx, idx_to_artist_id, user_item_ratings
+        artist_id_to_idx, idx_to_artist_id, user_item_ratings
+
+
+def preprocess_tag_data(user_tagged_artists_df, artist_id_to_idx, tag_id_to_value):
+    """
+    预处理标签数据，构建艺术家-标签映射。
+
+    Args:
+        user_tagged_artists_df (pd.DataFrame): 从 user_taggedartists.dat 加载的 DataFrame。
+        artist_id_to_idx (dict): 艺术家ID到矩阵索引的映射 (来自训练集)。
+        tag_id_to_value (dict): 标签ID到标签值的映射。
+
+    Returns:
+        dict: 艺术家ID到其关联标签列表的映射，例如 {artist_id: [tag_value1, tag_value2, ...]}。
+        dict: 艺术家ID到其关联标签ID列表的映射，例如 {artist_id: [tag_id1, tag_id2, ...]}。
+        set: 所有唯一的标签值集合。
+    """
+    artist_to_tags = {}
+    artist_to_tag_ids = {}
+    unique_tags = set()
+
+    # 过滤掉不在训练集艺术家列表中的标签记录
+    filtered_tags_df = user_tagged_artists_df[
+        user_tagged_artists_df['artistID'].isin(artist_id_to_idx.keys())
+    ]
+
+    for _, row in filtered_tags_df.iterrows():
+        artist_id = int(row['artistID'])
+        tag_id = int(row['tagID'])
+
+        # 确保标签ID存在于 tags.dat 中
+        if tag_id in tag_id_to_value:
+            tag_value = tag_id_to_value[tag_id]
+
+            artist_to_tags.setdefault(artist_id, []).append(tag_value)
+            artist_to_tag_ids.setdefault(artist_id, []).append(tag_id)
+            unique_tags.add(tag_value)
+
+    # 去重：一个艺术家可能被不同用户打上相同的标签
+    for artist_id in artist_to_tags:
+        artist_to_tags[artist_id] = list(set(artist_to_tags[artist_id]))
+        artist_to_tag_ids[artist_id] = list(set(artist_to_tag_ids[artist_id]))
+
+    print(
+        f"标签数据预处理完成。从 {len(filtered_tags_df)} 条记录中提取了 {len(artist_to_tags)} 位艺术家的标签，共 {len(unique_tags)} 个唯一标签。")
+    return artist_to_tags, artist_to_tag_ids, unique_tags
+

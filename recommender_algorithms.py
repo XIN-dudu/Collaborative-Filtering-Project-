@@ -1,11 +1,12 @@
 # recommender_algorithms.py
 
 import numpy as np
-from scipy.sparse import csr_matrix  # 确保导入 csr_matrix
-from sklearn.metrics.pairwise import cosine_similarity  # , pearson_similarity # 引入 pearson_similarity 如果要尝试
+from scipy.sparse import csr_matrix
+from sklearn.metrics.pairwise import cosine_similarity
+from collections import defaultdict  # 引入 defaultdict 用于方便地构建用户标签偏好
 
 
-# --- 现有函数 (如果你的文件中有，请保持一致，否则删除) ---
+# --- 现有函数 ---
 
 def calculate_user_similarity_cosine(user_artist_matrix):
     """
@@ -15,10 +16,7 @@ def calculate_user_similarity_cosine(user_artist_matrix):
     Returns:
         np.array: 稠密的用户相似度矩阵。
     """
-    # 确保输入是 csr_matrix
     if not isinstance(user_artist_matrix, csr_matrix):
-        # 如果不是，尝试转换为 csr_matrix，这可能是一个错误情况
-        # 你的主程序应该确保传递 csr_matrix
         print("警告: calculate_user_similarity_cosine 接收到的不是 csr_matrix，正在尝试转换。")
         user_artist_matrix = csr_matrix(user_artist_matrix)
 
@@ -39,8 +37,6 @@ def calculate_item_similarity_cosine(artist_user_matrix):
 
     return cosine_similarity(artist_user_matrix)
 
-
-# --- 新增/修改函数 ---
 
 def calculate_user_similarity_social_fused(user_artist_matrix, user_friends_data,
                                            user_id_to_idx, idx_to_user_id, alpha=0.5):
@@ -149,9 +145,10 @@ def recommend_user_based_cf(user_id, user_artist_matrix, user_similarity_matrix,
                 artist_scores.setdefault(artist_id, 0.0)
                 artist_scores[artist_id] += similarity * listen_count
 
-    # 按预测评分排序并返回 Top-N 推荐
-    recommended_artists = sorted(artist_scores.items(), key=lambda item: item[1], reverse=True)
-    return [artist_id for artist_id, score in recommended_artists[:num_recommendations]]
+    # 按预测评分排序
+    recommended_artists_with_scores = sorted(artist_scores.items(), key=lambda item: item[1], reverse=True)
+    # 返回包含分数和艺术家ID的列表
+    return recommended_artists_with_scores[:num_recommendations]
 
 
 def recommend_item_based_cf(user_id, user_artist_matrix, item_similarity_matrix,
@@ -170,7 +167,7 @@ def recommend_item_based_cf(user_id, user_artist_matrix, item_similarity_matrix,
         num_recommendations (int): 要推荐的艺术家数量。
         k_neighbors (int): 邻居的数量。
     返回:
-        list: 推荐的艺术家 ID 列表。
+        list: 推荐的艺术家 ID 和对应分数 (artist_id, score) 元组的列表。
     """
     if user_id not in user_id_to_idx:
         return []
@@ -217,6 +214,197 @@ def recommend_item_based_cf(user_id, user_artist_matrix, item_similarity_matrix,
             artist_scores.setdefault(neighbor_artist_id, 0.0)
             artist_scores[neighbor_artist_id] += similarity * listen_count
 
-    # 按预测评分排序并返回 Top-N 推荐
-    recommended_artists = sorted(artist_scores.items(), key=lambda item: item[1], reverse=True)
-    return [artist_id for artist_id, score in recommended_artists[:num_recommendations]]
+    # 按预测评分排序
+    recommended_artists_with_scores = sorted(artist_scores.items(), key=lambda item: item[1], reverse=True)
+    # 返回包含分数和艺术家ID的列表
+    return recommended_artists_with_scores[:num_recommendations]
+
+
+def calculate_jaccard_similarity(set1, set2):
+    """
+    计算两个集合之间的Jaccard相似度。
+    Args:
+        set1 (set): 集合1。
+        set2 (set): 集合2。
+    Returns:
+        float: Jaccard相似度。如果两个集合都为空，返回0。
+    """
+    intersection = len(set1.intersection(set2))
+    union = len(set1.union(set2))
+    if union == 0:
+        return 0.0  # 避免除以零
+    return intersection / union
+
+
+def recommend_content_based(user_id, user_item_ratings_train, artist_to_tags,
+                            unique_tags, artist_id_to_idx, idx_to_artist_id, num_recommendations=10):
+    """
+    基于内容的推荐函数。
+    根据用户已听艺术家的标签偏好来推荐新艺术家。
+
+    Args:
+        user_id (int): 要为其生成推荐的用户 ID。
+        user_item_ratings_train (dict): 训练集中用户-艺术家播放次数的字典。
+        artist_to_tags (dict): 艺术家ID到其关联标签列表的映射。
+        unique_tags (set): 所有唯一的标签值集合。
+        artist_id_to_idx (dict): 从实际艺术家 ID 到矩阵索引的映射 (用于过滤有效艺术家)。
+        idx_to_artist_id (dict): 从矩阵索引到实际艺术家 ID 的映射 (用于过滤有效艺术家)。
+        num_recommendations (int): 要推荐的艺术家数量。
+
+    Returns:
+        list: 推荐的艺术家 ID 和对应分数 (artist_id, score) 元组的列表。
+    """
+    if user_id not in user_item_ratings_train:
+        return []  # 如果用户没有历史记录，无法进行内容基推荐
+
+    user_listened_artists_with_ratings = user_item_ratings_train.get(user_id, {})
+    listened_artist_ids = set(user_listened_artists_with_ratings.keys())
+
+    # 1. 构建用户标签偏好档案 (User-Tag Profile)
+    # 简单的标签偏好：统计用户听过的艺术家所拥有的标签的出现频率，并根据播放次数加权
+    user_tag_profile = defaultdict(float)
+
+    for artist_id, listen_count in user_listened_artists_with_ratings.items():
+        if artist_id in artist_to_tags:  # 确保艺术家有标签数据
+            artist_tags = artist_to_tags[artist_id]
+            for tag in artist_tags:
+                # 标签偏好 = 播放次数 * 1 (这里简单使用标签存在性，也可以根据标签重要性加权)
+                user_tag_profile[tag] += listen_count
+
+    if not user_tag_profile:  # 如果用户听过的艺术家都没有标签，无法进行内容基推荐
+        return []
+
+    # 2. 预测未听过艺术家的评分
+    candidate_artist_scores = {}
+
+    # 遍历所有在训练集中的有效艺术家
+    for artist_id in artist_id_to_idx.keys():
+        if artist_id in listened_artist_ids:
+            continue  # 跳过用户已经听过的艺术家
+
+        if artist_id not in artist_to_tags:
+            continue  # 跳过没有标签信息的艺术家
+
+        artist_tags = set(artist_to_tags[artist_id])  # 将艺术家的标签转换为集合
+
+        # 计算艺术家与用户标签偏好的相似度
+        # 这里使用简化的“点积”方式：艺术家标签在用户偏好中的总和
+        score = 0.0
+        for tag in artist_tags:
+            score += user_tag_profile[tag]  # 艺术家标签的偏好权重之和
+
+        # 如果需要更严谨的集合相似度，可以使用Jaccard相似度：
+        # user_profile_tags_set = set(user_tag_profile.keys()) # 转换为集合用于Jaccard
+        # score = calculate_jaccard_similarity(artist_tags, user_profile_tags_set)
+
+        if score > 0:  # 只保留有正向偏好的艺术家
+            candidate_artist_scores[artist_id] = score
+
+    # 3. 排序并返回 Top-N 推荐
+    recommended_artists_with_scores = sorted(
+        candidate_artist_scores.items(), key=lambda item: item[1], reverse=True
+    )
+
+    return recommended_artists_with_scores[:num_recommendations]
+
+
+def recommend_hybrid_weighted(user_id,
+                              user_artist_matrix_train, user_similarity_matrix_fused,
+                              user_id_to_idx_train, idx_to_user_id_train, artist_id_to_idx_train,
+                              idx_to_artist_id_train,
+                              user_item_ratings_train,
+                              artist_to_tags, unique_tags,
+                              num_recommendations=10,
+                              ub_k_neighbors=200,
+                              cb_weight=0.5):
+    """
+    加权混合推荐函数，融合 User-Based CF (Social Fused) 和 Content-Based 推荐。
+
+    Args:
+        user_id (int): 要为其生成推荐的用户 ID。
+        user_artist_matrix_train (csr_matrix): 用户-艺术家训练矩阵。
+        user_similarity_matrix_fused (np.array): 融合后的用户相似度矩阵。
+        user_id_to_idx_train (dict): 用户ID到矩阵索引的映射。
+        idx_to_user_id_train (dict): 矩阵索引到用户ID的映射。
+        artist_id_to_idx_train (dict): 艺术家ID到矩阵索引的映射。
+        idx_to_artist_id_train (dict): 矩阵索引到艺术家ID的映射。
+        user_item_ratings_train (dict): 训练集中用户-艺术家播放次数的字典。
+        artist_to_tags (dict): 艺术家ID到其关联标签列表的映射。
+        unique_tags (set): 所有唯一的标签值集合。
+        num_recommendations (int): 要推荐的艺术家数量。
+        ub_k_neighbors (int): User-Based CF 的邻居数量。
+        cb_weight (float): Content-Based 推荐结果的权重 (0到1)。
+                           (1 - cb_weight) 将是 User-Based CF 的权重。
+
+    Returns:
+        list: 推荐的艺术家 ID 列表。
+    """
+
+    # 获取 User-Based CF 的推荐分数
+    ub_recs_with_scores = recommend_user_based_cf(
+        user_id=user_id,
+        user_artist_matrix=user_artist_matrix_train,
+        user_similarity_matrix=user_similarity_matrix_fused,
+        user_id_to_idx=user_id_to_idx_train,
+        idx_to_user_id=idx_to_user_id_train,
+        user_item_ratings_train=user_item_ratings_train,
+        num_recommendations=num_recommendations * 2,  # 临时获取更多以确保合并后有足够数量
+        k_neighbors=ub_k_neighbors
+    )
+
+    # 获取 Content-Based CF 的推荐分数
+    cb_recs_with_scores = recommend_content_based(
+        user_id=user_id,
+        user_item_ratings_train=user_item_ratings_train,
+        artist_to_tags=artist_to_tags,
+        unique_tags=unique_tags,
+        artist_id_to_idx=artist_id_to_idx_train,
+        idx_to_artist_id=idx_to_artist_id_train,
+        num_recommendations=num_recommendations * 2  # 临时获取更多
+    )
+
+    final_scores = defaultdict(float)
+    all_recommended_artists = set()
+
+    # 标准化分数：将所有分数映射到 0-1 之间，以便加权融合
+    # 对 User-Based CF 分数进行标准化
+    ub_scores_only = [score for _, score in ub_recs_with_scores]
+    min_ub_score = min(ub_scores_only) if ub_scores_only else 0
+    max_ub_score = max(ub_scores_only) if ub_scores_only else 0
+
+    ub_norm_factor = max_ub_score - min_ub_score if max_ub_score - min_ub_score > 0 else 1.0
+
+    # 对 Content-Based 分数进行标准化
+    cb_scores_only = [score for _, score in cb_recs_with_scores]
+    min_cb_score = min(cb_scores_only) if cb_scores_only else 0
+    max_cb_score = max(cb_scores_only) if cb_scores_only else 0
+
+    cb_norm_factor = max_cb_score - min_cb_score if max_cb_score - min_cb_score > 0 else 1.0
+
+    # 合并 User-Based CF 结果
+    for artist_id, score in ub_recs_with_scores:
+        normalized_score = (score - min_ub_score) / ub_norm_factor if ub_norm_factor != 0 else 0.0
+        final_scores[artist_id] += (1 - cb_weight) * normalized_score
+        all_recommended_artists.add(artist_id)
+
+    # 合并 Content-Based CF 结果
+    for artist_id, score in cb_recs_with_scores:
+        normalized_score = (score - min_cb_score) / cb_norm_factor if cb_norm_factor != 0 else 0.0
+        final_scores[artist_id] += cb_weight * normalized_score
+        all_recommended_artists.add(artist_id)
+
+    # 获取用户已经听过的艺术家，以便最终推荐时排除
+    user_listened_artists = set(user_item_ratings_train.get(user_id, {}).keys())
+
+    # 排序并返回 Top-N 推荐 (排除已听过的)
+    sorted_final_recs = sorted(final_scores.items(), key=lambda item: item[1], reverse=True)
+
+    final_recommendations = []
+    for artist_id, score in sorted_final_recs:
+        if artist_id not in user_listened_artists:
+            final_recommendations.append(artist_id)
+        if len(final_recommendations) >= num_recommendations:
+            break
+
+    return final_recommendations
+
