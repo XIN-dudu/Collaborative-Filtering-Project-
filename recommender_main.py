@@ -8,10 +8,11 @@ import recommender_eval as re  # 评估模块
 import os  # 用于检查文件是否存在
 import joblib  # 用于保存和加载对象
 import pickle  # 用于保存和加载非 joblib 格式的对象，如 dict
-import time # 用于计时
+import time  # 用于计时
+from collections import defaultdict  # 用于统计标签频率
 
 # 从 sklearn 导入用于数据划分的工具
-from sklearn.model_selection import train_test_split # 修正：移除了多余的 '_model'
+from sklearn.model_selection import train_test_split
 
 # 定义数据文件路径
 USER_ARTISTS_DAT_PATH = 'resources/user_artists.dat'
@@ -21,14 +22,17 @@ USER_FRIENDS_DAT_PATH = 'resources/user_friends.dat'  # 社交数据路径
 TAGS_DAT_PATH = 'resources/tags.dat'
 USER_TAGGED_ARTISTS_DAT_PATH = 'resources/user_taggedartists.dat'
 
-
 # 定义缓存文件夹和文件路径
 CACHE_DIR = 'cache'
 USER_FRIENDS_CACHE = os.path.join(CACHE_DIR, 'user_friends_data.pkl')  # 社交数据缓存
-ITEM_SIMILARITY_CACHE = os.path.join(CACHE_DIR, 'item_similarity_matrix.pkl') # Item-Based CF 相似度矩阵缓存
+ITEM_SIMILARITY_CACHE = os.path.join(CACHE_DIR, 'item_similarity_matrix.pkl')  # Item-Based CF 相似度矩阵缓存
 # 新增：标签相关数据缓存路径 (如果未来需要缓存预处理结果)
 ARTIST_TO_TAGS_CACHE = os.path.join(CACHE_DIR, 'artist_to_tags.pkl')
 UNIQUE_TAGS_CACHE = os.path.join(CACHE_DIR, 'unique_tags.pkl')
+# 注意：标签频率过滤的缓存文件名现在包含了过滤参数，以避免混淆
+# 旧的 FILTERED_ARTIST_TO_TAGS_CACHE 和 FILTERED_UNIQUE_TAGS_CACHE 可以移除或根据需要更新
+# FILTERED_ARTIST_TO_TAGS_CACHE = os.path.join(CACHE_DIR, 'filtered_artist_to_tags.pkl')
+# FILTERED_UNIQUE_TAGS_CACHE = os.path.join(CACHE_DIR, 'filtered_unique_tags.pkl')
 
 
 # 确保缓存目录存在
@@ -47,10 +51,13 @@ BEST_K_NEIGHBORS_UB = 200
 # Item-Based CF 的最佳参数
 BEST_K_NEIGHBORS_IB = 180
 
-# 新增：混合推荐的最佳参数 (Content-Based 权重)
-# 您可以根据实验结果调整这个值，通常在 0.1 到 0.5 之间尝试
-BEST_CB_WEIGHT_HYBRID = 0.25 # 假设内容基占 25%，User-Based CF 占 75%
+# 新增：混合推荐的最佳参数 (Content-Based 权重) - 使用上次调参的最佳结果
+BEST_CB_WEIGHT_HYBRID = 0.09  # 根据上次调参结果
+BEST_MIN_TAGS_PER_ARTIST_CB = 3  # 根据上次调参结果
 
+# 新增：标签过滤参数 (用于 Content-Based 部分的全局过滤)
+MIN_TAG_FREQ_GLOBAL = 5  # 标签在所有艺术家中出现的最低次数
+MAX_TAG_FREQ_RATIO_GLOBAL = 0.5  # 标签在所有艺术家中出现的最高比例 (例如，0.5表示最多出现在50%的艺术家中)
 
 NUM_RECOMMENDATIONS = 10  # 推荐数量
 
@@ -98,7 +105,6 @@ except UnicodeDecodeError as e:
     print(f"解码错误: 无法使用 latin1 编码读取 {TAGS_DAT_PATH}。尝试其他编码或检查文件。错误信息: {e}")
     exit()
 
-
 # 新增：加载用户-艺术家标签数据 (user_taggedartists.dat)
 print("加载 user_taggedartists.dat 信息...")
 try:
@@ -111,7 +117,6 @@ except FileNotFoundError:
 except UnicodeDecodeError as e:
     print(f"解码错误: 无法使用 latin1 编码读取 {USER_TAGGED_ARTISTS_DAT_PATH}。尝试其他编码或检查文件。错误信息: {e}")
     exit()
-
 
 # 划分训练集和测试集 (基于原始 df_user_artists)
 train_df, test_df = train_test_split(raw_user_artists_df, test_size=0.2, random_state=42)
@@ -156,41 +161,103 @@ print(f"测试集用户播放记录加载完成，包含 {len(user_item_ratings_
 
 # 新增：预处理标签数据
 print("\n预处理标签数据...")
-# 尝试从缓存加载
-artist_to_tags = None
-unique_tags = None
+# 尝试从缓存加载原始 artist_to_tags 和 unique_tags
+artist_to_tags_raw = None
+unique_tags_raw = None
 
 if os.path.exists(ARTIST_TO_TAGS_CACHE) and os.path.exists(UNIQUE_TAGS_CACHE):
-    print(f"尝试从缓存加载艺术家-标签映射和唯一标签集合...")
+    print(f"尝试从缓存加载原始艺术家-标签映射和唯一标签集合...")
     try:
         with open(ARTIST_TO_TAGS_CACHE, 'rb') as f:
-            artist_to_tags = pickle.load(f)
+            artist_to_tags_raw = pickle.load(f)
         with open(UNIQUE_TAGS_CACHE, 'rb') as f:
-            unique_tags = pickle.load(f)
-        print("艺术家-标签映射和唯一标签集合从缓存加载成功。")
+            unique_tags_raw = pickle.load(f)
+        print("原始艺术家-标签映射和唯一标签集合从缓存加载成功。")
     except Exception as e:
-        print(f"加载缓存失败: {e}。将重新处理标签数据。错误信息: {e}")
-        artist_to_tags = None
-        unique_tags = None
+        print(f"加载原始缓存失败: {e}。将重新处理标签数据。")
+        artist_to_tags_raw = None
+        unique_tags_raw = None
 
-if artist_to_tags is None or unique_tags is None:
+if artist_to_tags_raw is None or unique_tags_raw is None:
     start_time_tag_process = time.time()
-    # 注意：preprocess_tag_data 返回三个值，我们只存储了 artist_to_tags 和 unique_tags
-    # artist_to_tag_ids 也可以存储，但当前未直接使用
-    artist_to_tags, _, unique_tags = UserMatrix2.preprocess_tag_data(
+    artist_to_tags_raw, _, unique_tags_raw = UserMatrix2.preprocess_tag_data(
         user_tagged_artists_df,
-        artist_id_to_idx_train, # 使用训练集中的艺术家ID映射
+        artist_id_to_idx_train,  # 使用训练集中的艺术家ID映射
         tag_id_to_value
     )
     with open(ARTIST_TO_TAGS_CACHE, 'wb') as f:
-        pickle.dump(artist_to_tags, f)
+        pickle.dump(artist_to_tags_raw, f)
     with open(UNIQUE_TAGS_CACHE, 'wb') as f:
-        pickle.dump(unique_tags, f)
+        pickle.dump(unique_tags_raw, f)
     end_time_tag_process = time.time()
-    print(f"标签数据预处理并保存到缓存完成，耗时: {end_time_tag_process - start_time_tag_process:.2f} 秒。")
+    print(f"标签数据预处理并保存到原始缓存完成，耗时: {end_time_tag_process - start_time_tag_process:.2f} 秒。")
 
-print(f"共加载 {len(unique_tags)} 个唯一标签。")
+print(f"共加载 {len(unique_tags_raw)} 个唯一标签 (原始)。")
 
+# --- 新增：标签频率过滤 ---
+print("\n进行标签频率过滤...")
+artist_to_tags_filtered = {}
+unique_tags_filtered = set()
+
+# 尝试从缓存加载过滤后的标签数据
+# 确保缓存文件名的区分度，可以加上 MIN_TAG_FREQ_GLOBAL 和 MAX_TAG_FREQ_RATIO_GLOBAL
+FILTERED_ARTIST_TO_TAGS_CACHE_SPECIFIC = os.path.join(CACHE_DIR,
+                                                      f'filtered_artist_to_tags_min{MIN_TAG_FREQ_GLOBAL}_max{int(MAX_TAG_FREQ_RATIO_GLOBAL * 100)}.pkl')
+FILTERED_UNIQUE_TAGS_CACHE_SPECIFIC = os.path.join(CACHE_DIR,
+                                                   f'filtered_unique_tags_min{MIN_TAG_FREQ_GLOBAL}_max{int(MAX_TAG_FREQ_RATIO_GLOBAL * 100)}.pkl')
+
+if os.path.exists(FILTERED_ARTIST_TO_TAGS_CACHE_SPECIFIC) and os.path.exists(FILTERED_UNIQUE_TAGS_CACHE_SPECIFIC):
+    print(f"尝试从缓存加载过滤后的艺术家-标签映射和唯一标签集合 (根据当前过滤参数)...")
+    try:
+        with open(FILTERED_ARTIST_TO_TAGS_CACHE_SPECIFIC, 'rb') as f:
+            artist_to_tags_filtered = pickle.load(f)
+        with open(FILTERED_UNIQUE_TAGS_CACHE_SPECIFIC, 'rb') as f:
+            unique_tags_filtered = pickle.load(f)
+        print("过滤后的标签数据从缓存加载成功。")
+    except Exception as e:
+        print(f"加载过滤缓存失败: {e}。将重新过滤标签数据。")
+        artist_to_tags_filtered = {}
+        unique_tags_filtered = set()
+
+if not artist_to_tags_filtered or not unique_tags_filtered:
+    start_time_filter = time.time()
+    # 1. 统计每个标签在多少个艺术家中出现
+    tag_document_counts = defaultdict(int)
+    for artist_id, tags in artist_to_tags_raw.items():
+        for tag in tags:
+            tag_document_counts[tag] += 1
+
+    total_artists_in_raw_data = len(artist_to_tags_raw)
+
+    # 确定要保留的标签
+    valid_tags_set = set()
+    for tag, count in tag_document_counts.items():
+        if count >= MIN_TAG_FREQ_GLOBAL and \
+                count / total_artists_in_raw_data <= MAX_TAG_FREQ_RATIO_GLOBAL:
+            valid_tags_set.add(tag)
+
+    # 2. 过滤 artist_to_tags
+    for artist_id, tags in artist_to_tags_raw.items():
+        filtered_tags_for_artist = [tag for tag in tags if tag in valid_tags_set]
+        if filtered_tags_for_artist:  # 只有当艺术家至少有一个有效标签时才保留
+            artist_to_tags_filtered[artist_id] = filtered_tags_for_artist
+            unique_tags_filtered.update(filtered_tags_for_artist)
+
+    # 保存过滤后的数据到缓存
+    with open(FILTERED_ARTIST_TO_TAGS_CACHE_SPECIFIC, 'wb') as f:
+        pickle.dump(artist_to_tags_filtered, f)
+    with open(FILTERED_UNIQUE_TAGS_CACHE_SPECIFIC, 'wb') as f:
+        pickle.dump(unique_tags_filtered, f)
+
+    end_time_filter = time.time()
+    print(f"标签频率过滤完成，耗时: {end_time_filter - start_time_filter:.2f} 秒。")
+
+print(f"过滤后，共保留 {len(unique_tags_filtered)} 个唯一标签。")
+print(f"过滤后，共保留 {len(artist_to_tags_filtered)} 位艺术家的标签信息。")
+
+# 将过滤后的标签数据用于后续的 Content-Based 推荐
+artist_to_tags = artist_to_tags_filtered
+unique_tags = unique_tags_filtered
 
 # --- 阶段 2: 加载社交数据 ---
 print("\n阶段 2: 加载社交数据...")
@@ -244,7 +311,7 @@ if os.path.exists(fused_sim_cache_path):
     try:
         user_similarity_matrix_fused = joblib.load(fused_sim_cache_path)
         if user_similarity_matrix_fused.shape[0] != user_artist_matrix_train.shape[0] or \
-           user_similarity_matrix_fused.shape[1] != user_artist_matrix_train.shape[0]:
+                user_similarity_matrix_fused.shape[1] != user_artist_matrix_train.shape[0]:
             print("警告：缓存的融合相似度矩阵形状不匹配，将重新计算。")
             user_similarity_matrix_fused = None
     except Exception as e:
@@ -266,7 +333,6 @@ if user_similarity_matrix_fused is None:
     print(f"融合用户相似度矩阵计算并保存完成，耗时: {end_time_ub_sim - start_time_ub_sim:.2f} 秒。")
 
 print("融合用户相似度矩阵维度:", user_similarity_matrix_fused.shape)
-
 
 # 计算并缓存物品相似度矩阵 (Item-Based CF)
 item_similarity_matrix = None
@@ -290,10 +356,10 @@ if item_similarity_matrix is None:
     item_similarity_matrix = ra.calculate_item_similarity_cosine(artist_user_matrix_train)
     joblib.dump(item_similarity_matrix, ITEM_SIMILARITY_CACHE)
     end_time_ib_sim = time.time()
-    print(f"物品相似度矩阵已计算并保存到缓存文件 '{ITEM_SIMILARITY_CACHE}'，耗时: {end_time_ib_sim - start_time_ib_sim:.2f} 秒。")
+    print(
+        f"物品相似度矩阵已计算并保存到缓存文件 '{ITEM_SIMILARITY_CACHE}'，耗时: {end_time_ib_sim - start_time_ib_sim:.2f} 秒。")
 
 print("物品相似度矩阵维度:", item_similarity_matrix.shape)
-
 
 # --- 阶段 4: 推荐生成和评估 ---
 print("\n--- 阶段 4: 推荐生成和评估 ---")
@@ -304,10 +370,10 @@ users_to_evaluate_ids_raw = list(users_in_train_and_test)
 
 users_for_eval = []
 if FAST_EVAL_MODE:
-    np.random.seed(42) # 保证每次运行选到的用户相同
+    np.random.seed(42)  # 保证每次运行选到的用户相同
     users_for_eval = np.random.choice(users_to_evaluate_ids_raw,
-                                             min(FAST_EVAL_USER_LIMIT, len(users_to_evaluate_ids_raw)),
-                                             replace=False).tolist()
+                                      min(FAST_EVAL_USER_LIMIT, len(users_to_evaluate_ids_raw)),
+                                      replace=False).tolist()
     print(f"!!! 快速评估模式：只评估 {len(users_for_eval)} 个用户 !!!")
 else:
     users_for_eval = users_to_evaluate_ids_raw
@@ -319,20 +385,18 @@ for user_id in users_for_eval:
     current_user_test_artists = user_item_ratings_test.get(user_id, {})
     filtered_artists = {
         artist_id: count for artist_id, count in current_user_test_artists.items()
-        if artist_id in artist_id_to_idx_train # 艺术家在训练集构建的矩阵中存在
+        if artist_id in artist_id_to_idx_train  # 艺术家在训练集构建的矩阵中存在
     }
-    if filtered_artists: # 如果过滤后用户仍有有效测试记录
+    if filtered_artists:  # 如果过滤后用户仍有有效测试记录
         eval_test_ratings_filtered[user_id] = filtered_artists
 
 print(f"最终用于评估的用户数量: {len(eval_test_ratings_filtered)}")
 
-
 # --- 评估 User-Based CF (Social Fused) 使用最佳参数 ---
 if user_similarity_matrix_fused is not None and eval_test_ratings_filtered:
-    print(f"\n--- 评估 User-Based CF (Social Fused) 使用最佳参数 (Alpha={BEST_ALPHA_FUSION_UB:.2f}, K_Neighbors={BEST_K_NEIGHBORS_UB}) ---")
+    print(f"\n--- 评估 User-Based CF (Social Fused) ---")
     start_time_ub_eval = time.time()
     avg_precision_ub, avg_recall_ub = re.evaluate_model(
-        # Lambda 函数现在只返回艺术家ID列表，re.evaluate_model 期望如此
         recommendation_function=lambda uid: [
             rec[0] for rec in ra.recommend_user_based_cf(
                 user_id=uid,
@@ -350,19 +414,23 @@ if user_similarity_matrix_fused is not None and eval_test_ratings_filtered:
         top_k=NUM_RECOMMENDATIONS
     )
     end_time_ub_eval = time.time()
+    # 计算 F1-score
+    f1_score_ub = 0.0
+    if (avg_precision_ub + avg_recall_ub) > 0:
+        f1_score_ub = 2 * (avg_precision_ub * avg_recall_ub) / \
+                      (avg_precision_ub + avg_recall_ub)
     print(f"User-Based CF (Social Fused) Precision@{NUM_RECOMMENDATIONS}: {avg_precision_ub:.4f}")
     print(f"User-Based CF (Social Fused) Recall@{NUM_RECOMMENDATIONS}: {avg_recall_ub:.4f}")
+    print(f"User-Based CF (Social Fused) F1-score@{NUM_RECOMMENDATIONS}: {f1_score_ub:.4f}")
     print(f"User-Based CF (Social Fused) 评估耗时: {end_time_ub_eval - start_time_ub_eval:.2f} 秒。")
 else:
     print("没有可用于评估 User-Based CF 的有效测试用户或相似度矩阵为空。")
 
-
 # --- 评估 Item-Based CF 使用最佳参数 ---
 if item_similarity_matrix is not None and eval_test_ratings_filtered:
-    print(f"\n--- 评估 Item-Based CF 使用最佳参数 (K_Neighbors={BEST_K_NEIGHBORS_IB}) ---")
+    print(f"\n--- 评估 Item-Based CF ---")
     start_time_ib_eval = time.time()
     avg_precision_ib, avg_recall_ib = re.evaluate_model(
-        # Lambda 函数现在只返回艺术家ID列表
         recommendation_function=lambda uid: [
             rec[0] for rec in ra.recommend_item_based_cf(
                 user_id=uid,
@@ -381,28 +449,33 @@ if item_similarity_matrix is not None and eval_test_ratings_filtered:
         top_k=NUM_RECOMMENDATIONS
     )
     end_time_ib_eval = time.time()
+    # 计算 F1-score
+    f1_score_ib = 0.0
+    if (avg_precision_ib + avg_recall_ib) > 0:
+        f1_score_ib = 2 * (avg_precision_ib * avg_recall_ib) / \
+                      (avg_precision_ib + avg_recall_ib)
     print(f"Item-Based CF Precision@{NUM_RECOMMENDATIONS}: {avg_precision_ib:.4f}")
     print(f"Item-Based CF Recall@{NUM_RECOMMENDATIONS}: {avg_recall_ib:.4f}")
+    print(f"Item-Based CF F1-score@{NUM_RECOMMENDATIONS}: {f1_score_ib:.4f}")
     print(f"Item-Based CF 评估耗时: {end_time_ib_eval - start_time_ib_eval:.2f} 秒。")
 else:
     print("没有可用于评估 Item-Based CF 的有效测试用户或物品相似度矩阵为空。")
 
-
 # --- 评估 Content-Based 推荐 ---
-if eval_test_ratings_filtered and artist_to_tags: # 确保有可评估的用户和标签数据
-    print(f"\n--- 评估 Content-Based 推荐 ---")
+if eval_test_ratings_filtered and artist_to_tags:  # 确保有可评估的用户和标签数据
+    print(f"\n--- 评估 Content-Based 推荐 (Min Tags Per Artist={BEST_MIN_TAGS_PER_ARTIST_CB}) ---")
     start_time_cb_eval = time.time()
     avg_precision_cb, avg_recall_cb = re.evaluate_model(
-        # Lambda 函数现在只返回艺术家ID列表
         recommendation_function=lambda uid: [
             rec[0] for rec in ra.recommend_content_based(
                 user_id=uid,
                 user_item_ratings_train=user_item_ratings_train,
-                artist_to_tags=artist_to_tags,
-                unique_tags=unique_tags,
+                artist_to_tags=artist_to_tags,  # 使用过滤后的标签数据
+                unique_tags=unique_tags,  # 使用过滤后的标签数据
                 artist_id_to_idx=artist_id_to_idx_train,
                 idx_to_artist_id=idx_to_artist_id_train,
-                num_recommendations=NUM_RECOMMENDATIONS
+                num_recommendations=NUM_RECOMMENDATIONS,
+                min_tags_per_artist=BEST_MIN_TAGS_PER_ARTIST_CB  # 传递参数
             )
         ],
         user_item_ratings_test=eval_test_ratings_filtered,
@@ -410,16 +483,23 @@ if eval_test_ratings_filtered and artist_to_tags: # 确保有可评估的用户�
         top_k=NUM_RECOMMENDATIONS
     )
     end_time_cb_eval = time.time()
+    # 计算 F1-score
+    f1_score_cb = 0.0
+    if (avg_precision_cb + avg_recall_cb) > 0:
+        f1_score_cb = 2 * (avg_precision_cb * avg_recall_cb) / \
+                      (avg_precision_cb + avg_recall_cb)
     print(f"Content-Based Precision@{NUM_RECOMMENDATIONS}: {avg_precision_cb:.4f}")
     print(f"Content-Based Recall@{NUM_RECOMMENDATIONS}: {avg_recall_cb:.4f}")
+    print(f"Content-Based F1-score@{NUM_RECOMMENDATIONS}: {f1_score_cb:.4f}")
     print(f"Content-Based 评估耗时: {end_time_cb_eval - start_time_cb_eval:.2f} 秒。")
 else:
     print("没有可用于评估 Content-Based 推荐的有效测试用户或标签数据为空。")
 
-
-# --- 新增：评估 Hybrid Weighted 推荐 ---
+# --- 评估 Hybrid Weighted 推荐 (使用最佳参数) ---
+# 仅当所有必要数据都可用时才进行评估
 if eval_test_ratings_filtered and user_similarity_matrix_fused is not None and artist_to_tags:
-    print(f"\n--- 评估 Hybrid Weighted 推荐 (CB Weight={BEST_CB_WEIGHT_HYBRID:.2f}) ---")
+    print(
+        f"\n--- 评估 Hybrid Weighted 推荐 (CB Weight={BEST_CB_WEIGHT_HYBRID:.2f}, Min Tags Per Artist={BEST_MIN_TAGS_PER_ARTIST_CB}) ---")
     start_time_hybrid_eval = time.time()
     avg_precision_hybrid, avg_recall_hybrid = re.evaluate_model(
         recommendation_function=lambda uid: ra.recommend_hybrid_weighted(
@@ -431,23 +511,31 @@ if eval_test_ratings_filtered and user_similarity_matrix_fused is not None and a
             artist_id_to_idx_train=artist_id_to_idx_train,
             idx_to_artist_id_train=idx_to_artist_id_train,
             user_item_ratings_train=user_item_ratings_train,
-            # 添加缺失的参数
-            artist_to_tags=artist_to_tags,
-            unique_tags=unique_tags,
+            artist_to_tags=artist_to_tags,  # 使用过滤后的标签数据
+            unique_tags=unique_tags,  # 使用过滤后的标签数据
             num_recommendations=NUM_RECOMMENDATIONS,
-            ub_k_neighbors=BEST_K_NEIGHBORS_UB, # 使用User-Based CF的最佳K
-            cb_weight=BEST_CB_WEIGHT_HYBRID
+            ub_k_neighbors=BEST_K_NEIGHBORS_UB,
+            cb_weight=BEST_CB_WEIGHT_HYBRID,  # 使用最佳权重
+            min_tags_per_artist=BEST_MIN_TAGS_PER_ARTIST_CB  # 使用最佳最小标签数
         ),
         user_item_ratings_test=eval_test_ratings_filtered,
         users_to_evaluate_ids=list(eval_test_ratings_filtered.keys()),
         top_k=NUM_RECOMMENDATIONS
     )
     end_time_hybrid_eval = time.time()
+
+    # 计算 F1-score
+    f1_score_hybrid = 0.0
+    if (avg_precision_hybrid + avg_recall_hybrid) > 0:
+        f1_score_hybrid = 2 * (avg_precision_hybrid * avg_recall_hybrid) / \
+                          (avg_precision_hybrid + avg_recall_hybrid)
+
     print(f"Hybrid Weighted Precision@{NUM_RECOMMENDATIONS}: {avg_precision_hybrid:.4f}")
     print(f"Hybrid Weighted Recall@{NUM_RECOMMENDATIONS}: {avg_recall_hybrid:.4f}")
+    print(f"Hybrid Weighted F1-score@{NUM_RECOMMENDATIONS}: {f1_score_hybrid:.4f}")
     print(f"Hybrid Weighted 评估耗时: {end_time_hybrid_eval - start_time_hybrid_eval:.2f} 秒。")
+
 else:
     print("没有可用于评估 Hybrid Weighted 推荐的有效测试用户、相似度矩阵或标签数据为空。")
-
 
 print("\n--- 音乐推荐系统关闭 ---")

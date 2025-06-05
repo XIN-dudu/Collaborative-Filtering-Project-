@@ -4,6 +4,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import defaultdict  # 引入 defaultdict 用于方便地构建用户标签偏好
+import math  # 引入 math 用于计算 log
 
 
 # --- 现有函数 ---
@@ -101,7 +102,7 @@ def recommend_user_based_cf(user_id, user_artist_matrix, user_similarity_matrix,
         num_recommendations (int): 要推荐的艺术家数量。
         k_neighbors (int): 邻居的数量。
     返回:
-        list: 推荐的艺术家 ID 列表。
+        list: 推荐的艺术家 ID 和对应分数 (artist_id, score) 元组的列表。
     """
     if user_id not in user_id_to_idx:
         return []  # 如果用户不在训练集中，无法推荐
@@ -236,10 +237,36 @@ def calculate_jaccard_similarity(set1, set2):
     return intersection / union
 
 
-def recommend_content_based(user_id, user_item_ratings_train, artist_to_tags,
-                            unique_tags, artist_id_to_idx, idx_to_artist_id, num_recommendations=10):
+def calculate_idf(artist_to_tags, unique_tags, total_artists_with_tags):
     """
-    基于内容的推荐函数。
+    计算每个标签的逆文档频率 (IDF)。
+    Args:
+        artist_to_tags (dict): 艺术家ID到其关联标签列表的映射。
+        unique_tags (set): 所有唯一的标签值集合。
+        total_artists_with_tags (int): 拥有标签的艺术家总数。
+    Returns:
+        dict: 标签到其IDF值的映射。
+    """
+    idf_scores = {}
+
+    # 统计每个标签在多少个艺术家中出现
+    tag_document_counts = defaultdict(int)
+    for artist_id, tags in artist_to_tags.items():
+        for tag in tags:
+            tag_document_counts[tag] += 1
+
+    # 计算 IDF
+    for tag in unique_tags:
+        # 避免除以零，并使用平滑项 +1
+        idf_scores[tag] = math.log10(total_artists_with_tags / (tag_document_counts[tag] + 1)) + 1
+    return idf_scores
+
+
+def recommend_content_based(user_id, user_item_ratings_train, artist_to_tags,
+                            unique_tags, artist_id_to_idx, idx_to_artist_id,
+                            num_recommendations=10, min_tags_per_artist=2):  # 新增参数
+    """
+    基于内容的推荐函数（使用 TF-IDF）。
     根据用户已听艺术家的标签偏好来推荐新艺术家。
 
     Args:
@@ -250,6 +277,7 @@ def recommend_content_based(user_id, user_item_ratings_train, artist_to_tags,
         artist_id_to_idx (dict): 从实际艺术家 ID 到矩阵索引的映射 (用于过滤有效艺术家)。
         idx_to_artist_id (dict): 从矩阵索引到实际艺术家 ID 的映射 (用于过滤有效艺术家)。
         num_recommendations (int): 要推荐的艺术家数量。
+        min_tags_per_artist (int): 艺术家被考虑的最低标签数量。
 
     Returns:
         list: 推荐的艺术家 ID 和对应分数 (artist_id, score) 元组的列表。
@@ -260,21 +288,74 @@ def recommend_content_based(user_id, user_item_ratings_train, artist_to_tags,
     user_listened_artists_with_ratings = user_item_ratings_train.get(user_id, {})
     listened_artist_ids = set(user_listened_artists_with_ratings.keys())
 
-    # 1. 构建用户标签偏好档案 (User-Tag Profile)
-    # 简单的标签偏好：统计用户听过的艺术家所拥有的标签的出现频率，并根据播放次数加权
-    user_tag_profile = defaultdict(float)
+    # 计算标签的 IDF 值
+    # 仅考虑那些至少有 min_tags_per_artist 个标签的艺术家来计算 IDF
+    filtered_artists_for_idf = {
+        art_id: tags for art_id, tags in artist_to_tags.items()
+        if len(tags) >= min_tags_per_artist
+    }
+    total_artists_with_sufficient_tags = len(filtered_artists_for_idf)
 
-    for artist_id, listen_count in user_listened_artists_with_ratings.items():
-        if artist_id in artist_to_tags:  # 确保艺术家有标签数据
-            artist_tags = artist_to_tags[artist_id]
-            for tag in artist_tags:
-                # 标签偏好 = 播放次数 * 1 (这里简单使用标签存在性，也可以根据标签重要性加权)
-                user_tag_profile[tag] += listen_count
+    if total_artists_with_sufficient_tags == 0:
+        return []  # 如果没有艺术家有足够标签，无法进行内容基推荐
 
-    if not user_tag_profile:  # 如果用户听过的艺术家都没有标签，无法进行内容基推荐
+    idf_scores = calculate_idf(filtered_artists_for_idf, unique_tags, total_artists_with_sufficient_tags)
+
+    # 1. 构建艺术家标签的 TF-IDF 向量 (这里简化为字典形式)
+    artist_tag_tfidf_vectors = {}
+    for artist_id, tags in artist_to_tags.items():
+        total_tags_for_artist = len(tags)  # 获取该艺术家的总标签数
+
+        # 过滤掉标签数量不足的艺术家
+        if total_tags_for_artist < min_tags_per_artist:
+            continue
+
+        artist_tf = defaultdict(float)
+        # 计算 TF (这里是标签频率)
+        for tag in tags:
+            artist_tf[tag] += 1  # 原始计数
+
+        # 计算 TF-IDF
+        artist_tfidf_vector = {}
+        for tag, tf_count in artist_tf.items():
+            # TF = 标签出现次数 / 艺术家总标签数 (标准化词频)
+            tf = tf_count / total_tags_for_artist
+            artist_tfidf_vector[tag] = tf * idf_scores.get(tag, 0)  # 使用 get 避免标签不存在IDF
+        artist_tag_tfidf_vectors[artist_id] = artist_tfidf_vector
+
+    # 2. 构建用户标签偏好档案 (User-Tag Profile) - 平均化 TF-IDF 累加
+    user_tag_profile_tfidf = defaultdict(float)
+    count_artists_in_profile = 0  # 统计实际用于构建用户画像的艺术家数量
+
+    for artist_id, _ in user_listened_artists_with_ratings.items():  # 移除 listen_count 的直接使用
+        if artist_id in artist_tag_tfidf_vectors:  # 确保艺术家有 TF-IDF 向量 (即通过了标签数量过滤)
+            artist_tfidf_vector = artist_tag_tfidf_vectors[artist_id]
+            # 累加艺术家标签的 TF-IDF 分数
+            for tag, tfidf_score in artist_tfidf_vector.items():
+                user_tag_profile_tfidf[tag] += tfidf_score
+            count_artists_in_profile += 1  # 统计实际用于构建画像的艺术家数量
+
+    if not user_tag_profile_tfidf or count_artists_in_profile == 0:  # 如果用户听过的艺术家都没有TF-IDF标签信息，或者没有有效艺术家，无法进行内容基推荐
         return []
 
-    # 2. 预测未听过艺术家的评分
+    # 平均化用户偏好档案
+    for tag in user_tag_profile_tfidf:
+        user_tag_profile_tfidf[tag] /= count_artists_in_profile
+
+    # 将用户偏好档案转换为向量形式，以便计算余弦相似度
+    user_profile_vec = np.zeros(len(unique_tags))
+    tag_to_idx = {tag: i for i, tag in enumerate(sorted(list(unique_tags)))}  # 为标签创建索引
+
+    for tag, score in user_tag_profile_tfidf.items():
+        if tag in tag_to_idx:
+            user_profile_vec[tag_to_idx[tag]] = score
+
+    # 归一化用户偏好向量，如果需要 (余弦相似度通常不需要额外归一化输入向量，因为它内部会归一化)
+    # user_profile_vec_norm = np.linalg.norm(user_profile_vec)
+    # if user_profile_vec_norm > 0:
+    #     user_profile_vec = user_profile_vec / user_profile_vec_norm
+
+    # 3. 预测未听过艺术家的评分
     candidate_artist_scores = {}
 
     # 遍历所有在训练集中的有效艺术家
@@ -282,25 +363,37 @@ def recommend_content_based(user_id, user_item_ratings_train, artist_to_tags,
         if artist_id in listened_artist_ids:
             continue  # 跳过用户已经听过的艺术家
 
-        if artist_id not in artist_to_tags:
-            continue  # 跳过没有标签信息的艺术家
+        # 确保候选艺术家有足够标签，且其TF-IDF向量已构建
+        if artist_id not in artist_tag_tfidf_vectors:
+            continue
 
-        artist_tags = set(artist_to_tags[artist_id])  # 将艺术家的标签转换为集合
+        artist_tfidf_vector_dict = artist_tag_tfidf_vectors[artist_id]
 
-        # 计算艺术家与用户标签偏好的相似度
-        # 这里使用简化的“点积”方式：艺术家标签在用户偏好中的总和
+        # 将艺术家标签TF-IDF向量转换为与用户偏好向量相同维度的向量，以便计算余弦相似度
+        artist_vec = np.zeros(len(unique_tags))
+        for tag, tfidf_score in artist_tfidf_vector_dict.items():
+            if tag in tag_to_idx:
+                artist_vec[tag_to_idx[tag]] = tfidf_score
+
+        # 计算用户偏好向量与艺术家向量之间的余弦相似度
+        # reshape(-1, 1) or (1, -1) for single sample if using sklearn.metrics.pairwise.cosine_similarity
+        # Here, we do manual dot product and norm for simplicity
+
+        # 计算点积
+        dot_product = np.dot(user_profile_vec, artist_vec)
+
+        # 计算向量模长
+        user_norm = np.linalg.norm(user_profile_vec)
+        artist_norm = np.linalg.norm(artist_vec)
+
         score = 0.0
-        for tag in artist_tags:
-            score += user_tag_profile[tag]  # 艺术家标签的偏好权重之和
+        if user_norm > 0 and artist_norm > 0:
+            score = dot_product / (user_norm * artist_norm)
 
-        # 如果需要更严谨的集合相似度，可以使用Jaccard相似度：
-        # user_profile_tags_set = set(user_tag_profile.keys()) # 转换为集合用于Jaccard
-        # score = calculate_jaccard_similarity(artist_tags, user_profile_tags_set)
-
-        if score > 0:  # 只保留有正向偏好的艺术家
+        if score > 0:  # 只保留有正向相似度的艺术家
             candidate_artist_scores[artist_id] = score
 
-    # 3. 排序并返回 Top-N 推荐
+    # 4. 排序并返回 Top-N 推荐
     recommended_artists_with_scores = sorted(
         candidate_artist_scores.items(), key=lambda item: item[1], reverse=True
     )
@@ -313,10 +406,11 @@ def recommend_hybrid_weighted(user_id,
                               user_id_to_idx_train, idx_to_user_id_train, artist_id_to_idx_train,
                               idx_to_artist_id_train,
                               user_item_ratings_train,
-                              artist_to_tags, unique_tags,
+                              artist_to_tags, unique_tags,  # 标签数据参数
                               num_recommendations=10,
                               ub_k_neighbors=200,
-                              cb_weight=0.5):
+                              cb_weight=0.5,
+                              min_tags_per_artist=2):  # 新增参数
     """
     加权混合推荐函数，融合 User-Based CF (Social Fused) 和 Content-Based 推荐。
 
@@ -335,6 +429,7 @@ def recommend_hybrid_weighted(user_id,
         ub_k_neighbors (int): User-Based CF 的邻居数量。
         cb_weight (float): Content-Based 推荐结果的权重 (0到1)。
                            (1 - cb_weight) 将是 User-Based CF 的权重。
+        min_tags_per_artist (int): 艺术家被考虑的最低标签数量（用于Content-Based）。
 
     Returns:
         list: 推荐的艺术家 ID 列表。
@@ -360,7 +455,8 @@ def recommend_hybrid_weighted(user_id,
         unique_tags=unique_tags,
         artist_id_to_idx=artist_id_to_idx_train,
         idx_to_artist_id=idx_to_artist_id_train,
-        num_recommendations=num_recommendations * 2  # 临时获取更多
+        num_recommendations=num_recommendations * 2,  # 临时获取更多
+        min_tags_per_artist=min_tags_per_artist  # 传递新的参数
     )
 
     final_scores = defaultdict(float)
@@ -407,4 +503,3 @@ def recommend_hybrid_weighted(user_id,
             break
 
     return final_recommendations
-
